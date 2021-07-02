@@ -1,0 +1,88 @@
+#!/bin/bash
+
+echo ""
+echo "> Generating randomized name"
+
+echo "$(date)" | md5sum > md5sum
+
+md5sum=$(cat md5sum)
+
+randomName=${md5sum:1:31}
+randomNameShort=${md5sum:1:12}
+randomPwd="#${md5sum:10:22}!"
+myIP=$(curl ifconfig.me)
+
+rm md5sum
+
+echo ""
+echo "> Creating Azure Resource Group"
+az group create --name rg-$randomName --location eastus
+
+echo ""
+echo "> Creating Databricks workspace"
+
+az databricks workspace create --resource-group rg-$randomName --name ws-$randomNameShort --location eastus --sku standard --managed-resource-group mrg-$randomName --no-wait  --only-show-errors
+
+echo ""
+echo "> Creating Azure Storage Account"
+az storage account create --name sa$randomNameShort --resource-group rg-$randomName
+
+az storage container create --name landing --account-name sa$randomNameShort --only-show-errors
+
+az storage container create --name process --account-name sa$randomNameShort --only-show-errors
+
+az storage container create --name archive --account-name sa$randomNameShort --only-show-errors
+
+echo ""
+echo "> Generating Secure Access Code"
+az storage account generate-sas --expiry 2022-2-2'T'20:00'Z' --permissions acdlpruw --resource-types sco --services b --account-name sa$randomNameShort --only-show-errors > sas
+
+sas=$(sed -n 3p sas)
+
+rm sas
+
+echo ""
+echo "> Populating storage with data"
+
+az container create --resource-group rg-$randomName --name sampledata --image nu12/generate-pipeline-data:storageaccount --environment-variables START_DATE_MONTH=6 START_DATE_DAY=1 ITERATIONS=30 AZURE_STORAGE_ACCOUNT=sa$randomNameShort AZURE_STORAGE_SAS_TOKEN="$sas" --restart-policy OnFailure --no-wait
+
+echo ""
+echo "> Creating Azure SQL Database"
+
+az sql server create --name sqlserver-$randomNameShort --resource-group rg-$randomName --admin-user azureuser --admin-password $randomPwd --only-show-errors
+
+az sql db create --name db-$randomName --resource-group rg-$randomName --server sqlserver-$randomNameShort -e Basic --only-show-errors --no-wait
+
+# Allow access from Azure services
+az sql server firewall-rule create -g rg-$randomName -s sqlserver-$randomNameShort -n AzAccess --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
+
+# Allow access from user IP
+az sql server firewall-rule create -g rg-$randomName -s sqlserver-$randomNameShort -n MyIPAccess --start-ip-address $myIP --end-ip-address $myIP
+
+echo ""
+echo "> Creating Azure Key Vault to store SQL credentials information"
+
+az keyvault create --name kv-$randomNameShort --resource-group rg-$randomName
+
+az keyvault secret set --vault-name kv-$randomNameShort --name AzDatabaseUser --value "azureuser"
+
+az keyvault secret set --vault-name kv-$randomNameShort --name AzDatabasePassword --value "$randomPwd"
+
+echo ""
+echo "> Generating .env file"
+
+echo "resourceGroupName=\"rg-$randomName\"" > .env
+echo "storageAccountName=\"sa$randomNameShort\"" >> .env
+echo "landingContainerName=\"landing\"" >> .env
+echo "processContainerName=\"process\"" >> .env
+echo "archiveContainerName=\"archive\"" >> .env
+echo "sas=\"$sas\"" >> .env
+echo "sqlServerName=\"sqlserver-$randomNameShort\"" >> .env
+echo "sqlDatabaseName=\"db-$randomName\"" >> .env
+echo "sqlDatabaseUser=\"azureuser\"" >> .env
+echo "sqlDatabasePassword=\"$randomPwd\"" >> .env
+echo "keyVaultName=\"kv-$randomNameShort\"" >> .env
+echo "keyVaultSecretUserName=\"AzDatabaseUser\"" >> .env
+echo "keyVaultSecretPasswordName=\"AzDatabasePassword\"" >> .env
+echo "databricksWorkspaceName=\"ws-$randomNameShort\"" >> .env
+echo "databricksManagedResourceGroupName=\"mrg-$randomName\"" >> .env
